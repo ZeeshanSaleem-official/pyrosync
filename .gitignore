@@ -1,0 +1,44 @@
+# Environment and credentials
+.env
+.env.local
+.env.*.local
+deploy/.env
+
+# Local planning artifacts and editor directories
+*.docx
+PyroSync_Development_Plan*.md
+.gemini/
+.claude/
+.cursor/
+.vscode/
+.idea/
+
+# Raw FIRMS datasets and archives (ignored to stay within repository size limits)
+*.csv
+*.zip
+data/input/*.csv
+data/archive/*.csv
+data/**/*.csv
+data/**/*.zip
+*.dump
+*.sql.gz
+
+# Go build and test artifacts
+/bin/
+/pyrosync
+/pyrosync.exe
+coverage.out
+
+# Node / Next.js artifacts
+web/node_modules/
+web/.next/
+web/out/
+web/playwright-report/
+web/test-results/
+web/.eslintcache
+web/next-env.d.ts
+web/tsconfig.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db
