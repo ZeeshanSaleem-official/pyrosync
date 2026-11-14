@@ -6,18 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pyrosync/internal/aggregate"
+	"pyrosync/internal/api"
 	"pyrosync/internal/config"
 	"pyrosync/internal/db"
 	"pyrosync/internal/ingest"
+	"pyrosync/internal/sched"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -61,9 +65,14 @@ func main() {
 		if err := runCalibrate(ctx, cfg, logger, os.Args[2:]); err != nil {
 			fatal(cfg, logger, "calibrate failed", err)
 		}
-	case "serve", "ingest-api":
-		fmt.Fprintf(os.Stderr, "subcommand %q is not implemented yet\n", cmd)
-		os.Exit(1)
+	case "serve":
+		if err := runServe(ctx, cfg, logger, os.Args[2:]); err != nil {
+			fatal(cfg, logger, "serve failed", err)
+		}
+	case "ingest-api":
+		if err := runIngestAPI(ctx, cfg, logger, os.Args[2:]); err != nil {
+			fatal(cfg, logger, "ingest-api failed", err)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -249,6 +258,70 @@ func runCalibrate(ctx context.Context, cfg config.Config, logger *slog.Logger, a
 		)
 	}
 	return nil
+}
+
+func runServe(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	noPoller := fs.Bool("no-poller", false, "disable the background NRT poller")
+	addr := fs.String("addr", "", "override HTTP listen address (default from HTTP_ADDR)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *addr != "" {
+		cfg.HTTPAddr = *addr
+	}
+
+	pool, err := openMigratedPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	interval := time.Duration(cfg.IngestIntervalMin) * time.Minute
+	poller := sched.NewPoller(pool, cfg.FirmsMapKey, interval, sched.WithLogger(logger))
+
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *noPoller {
+		logger.Info("background NRT poller disabled via --no-poller")
+	} else if cfg.FirmsMapKey == "" {
+		logger.Info("background NRT poller disabled (FIRMS_MAP_KEY not set)")
+	} else {
+		go poller.Start(sigCtx)
+	}
+
+	srv := api.New(pool, cfg, poller, logger)
+	return srv.ListenAndServe(sigCtx)
+}
+
+func runIngestAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("ingest-api", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if cfg.FirmsMapKey == "" {
+		return fmt.Errorf("FIRMS_MAP_KEY is not configured")
+	}
+
+	pool, err := openMigratedPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	poller := sched.NewPoller(pool, cfg.FirmsMapKey, 0, sched.WithLogger(logger))
+	rep, err := poller.RunOnce(ctx)
+	if rep != nil {
+		logger.Info("api ingest complete",
+			"run_id", rep.RunID,
+			"rows_in", rep.RowsIn,
+			"recomputed_dates", rep.RecomputedDates,
+			"duration_ms", rep.DurationMS,
+			"feeds", len(rep.Feeds),
+		)
+	}
+	return err
 }
 
 func recomputeAndCalibrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
