@@ -551,10 +551,10 @@ export function CalendarDock({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", padding: "14px", border: "1px solid var(--line)", backgroundColor: "var(--bg-canvas)" }}>
             <div>
               <div style={{ fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>
-                Multi-Year Archive Not Seeded for {calendar?.region_name || params.region}
+                Multi-Year Archive Unavailable for {calendar?.region_name || params.region}
               </div>
               <div style={{ fontSize: "11px", color: "var(--text-2)" }}>
-                Historical calendar matrices unlock for regions with &gt;= 3 years of FIRMS Standard Processing (SP) archive CSVs seeded into PostgreSQL.
+                Seasonal burning calendars and Z-score anomaly baselines require &gt;= 3 years of NASA FIRMS Standard Processing (SP) records; this region currently holds near real-time (NRT) coverage.
               </div>
             </div>
             {archiveRegions.length > 0 && (
@@ -566,7 +566,7 @@ export function CalendarDock({
                     className="ps-btn"
                     onClick={() => onSelectRegion(rg.id)}
                   >
-                    Switch to {rg.name} ({rg.history_from?.slice(0, 4)}-{rg.history_to?.slice(0, 4)})
+                    View {rg.name} ({rg.history_from?.slice(0, 4)}-{rg.history_to?.slice(0, 4)})
                   </button>
                 ))}
               </div>
