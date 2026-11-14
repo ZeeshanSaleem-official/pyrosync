@@ -217,8 +217,12 @@ func (f queryFilter) bboxSQL(geomCol string, startIdx int) (string, []any) {
 		return "TRUE", nil
 	}
 	if f.West <= f.East {
-		expr := fmt.Sprintf("ST_Intersects(%s, ST_MakeEnvelope($%d, $%d, $%d, $%d, 4326))",
-			geomCol, startIdx, startIdx+1, startIdx+2, startIdx+3)
+		expr := fmt.Sprintf(
+			"(%s && ST_MakeEnvelope($%d, $%d, $%d, $%d, 4326) AND ST_X(%s) BETWEEN $%d AND $%d AND ST_Y(%s) BETWEEN $%d AND $%d)",
+			geomCol, startIdx, startIdx+1, startIdx+2, startIdx+3,
+			geomCol, startIdx, startIdx+2,
+			geomCol, startIdx+1, startIdx+3,
+		)
 		return expr, []any{f.West, f.South, f.East, f.North}
 	}
 	expr := fmt.Sprintf("ST_Intersects(%s, make_bbox_multipolygon($%d, $%d, $%d, $%d))",

@@ -43,10 +43,16 @@ func (s *Server) handleTilesCells10(w http.ResponseWriter, r *http.Request) {
 	args := append([]any{z, x, y, f.From, f.To, f.ConfLevel, mode}, bboxArgs...)
 
 	sql := fmt.Sprintf(`
-		WITH bounds AS (
+		WITH bounds AS MATERIALIZED (
 			SELECT
 				ST_TileEnvelope($1::int, $2::int, $3::int) AS env3857,
 				ST_Transform(ST_TileEnvelope($1::int, $2::int, $3::int), 4326) AS env4326
+		),
+		slice AS MATERIALIZED (
+			SELECT cell_a10, harmonized_frp, modis_px, viirs_px, cells_harmonized, pt
+			FROM cell_day_a10
+			WHERE acq_date BETWEEN $4::date AND $5::date
+				AND conf_level = $6
 		),
 		agg AS (
 			SELECT
@@ -56,11 +62,9 @@ func (s *Server) handleTilesCells10(w http.ResponseWriter, r *http.Request) {
 				COALESCE(SUM(c.viirs_px), 0)::int AS viirs_px,
 				COALESCE(SUM(c.modis_px + c.viirs_px), 0)::int AS raw_px,
 				COALESCE(MAX(c.cells_harmonized), 0)::int AS cells_harmonized
-			FROM cell_day_a10 c
+			FROM slice c
 			CROSS JOIN bounds b
-			WHERE c.acq_date BETWEEN $4::date AND $5::date
-				AND c.conf_level = $6
-				AND c.pt && ST_Expand(b.env4326, 0.15)
+			WHERE c.pt && ST_Expand(b.env4326, 0.15)
 				AND %s
 			GROUP BY c.cell_a10
 			HAVING ($7::text <> 'harmonized' OR COALESCE(SUM(c.harmonized_frp), 0) > 0 OR COALESCE(SUM(c.cells_harmonized), 0) > 0)
@@ -146,10 +150,16 @@ func (s *Server) handleTilesCells(w http.ResponseWriter, r *http.Request) {
 	args := append([]any{z, x, y, f.From, f.To, f.ConfLevel, mode}, bboxArgs...)
 
 	sql := fmt.Sprintf(`
-		WITH bounds AS (
+		WITH bounds AS MATERIALIZED (
 			SELECT
 				ST_TileEnvelope($1::int, $2::int, $3::int) AS env3857,
 				ST_Transform(ST_TileEnvelope($1::int, $2::int, $3::int), 4326) AS env4326
+		),
+		slice AS MATERIALIZED (
+			SELECT cell_a1, harmonized_frp, modis_frp, viirs_frp_meq, viirs_frp_all, modis_px, viirs_px, n_ov_modis, n_ov_viirs_meq, pt
+			FROM cell_day_a1
+			WHERE acq_date BETWEEN $4::date AND $5::date
+				AND conf_level = $6
 		),
 		agg AS (
 			SELECT
@@ -162,11 +172,9 @@ func (s *Server) handleTilesCells(w http.ResponseWriter, r *http.Request) {
 				COALESCE(SUM(c.viirs_px), 0)::int AS viirs_px,
 				COALESCE(SUM(c.modis_px + c.viirs_px), 0)::int AS raw_px,
 				(COALESCE(SUM(c.n_ov_modis + c.n_ov_viirs_meq), 0) > 0) AS kept
-			FROM cell_day_a1 c
+			FROM slice c
 			CROSS JOIN bounds b
-			WHERE c.acq_date BETWEEN $4::date AND $5::date
-				AND c.conf_level = $6
-				AND c.pt && ST_Expand(b.env4326, 0.02)
+			WHERE c.pt && ST_Expand(b.env4326, 0.02)
 				AND %s
 			GROUP BY c.cell_a1
 			HAVING ($7::text <> 'harmonized' OR COALESCE(SUM(c.harmonized_frp), 0) > 0)

@@ -36,8 +36,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://pyrosync:${DB_PASSWORD}@db:5432/pyrosync?sslmode=disable
-      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
-      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       HTTP_ADDR: ":8080"
       INGEST_INTERVAL_MIN: ${INGEST_INTERVAL_MIN:-60}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -49,6 +49,8 @@ services:
     restart: unless-stopped
     depends_on:
       - app
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     ports:
       - "80:80"
       - "443:443"

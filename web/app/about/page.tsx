@@ -56,7 +56,7 @@ robust_z(d)   = (H_d - median(H_{doy +/- 7})) / max(1.4826 * MAD, 0.05 * median,
             This project uses active fire data from NASA&apos;s Land, Atmosphere Near real-time Capability for EOS (LANCE) Fire Information for Resource Management System (FIRMS), specifically MODIS Collection 6.1 (Terra/Aqua) and VIIRS 375 m Collection 2 (Suomi-NPP, NOAA-20, NOAA-21) standard processing and near real-time products.
           </p>
           <p style={{ margin: "8px 0 0", color: "var(--text-3)", fontSize: "12px" }}>
-            Basemap cartography: OpenStreetMap contributors and CARTO Dark Matter raster tiles.
+            Basemap cartography: Esri, HERE, Garmin, OpenStreetMap contributors, and the GIS user community (World Dark Gray Canvas tiles).
           </p>
         </section>
 

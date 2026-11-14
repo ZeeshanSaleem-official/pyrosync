@@ -17,7 +17,7 @@ Raw VIIRS detections outnumber MODIS by roughly `4.76x` (Nominal+High confidence
 
 - **Backend & CLI:** Go 1.25 (`chi`, `pgx/v5`, `golang-migrate`)
 - **Spatial Database:** PostgreSQL 16 + PostGIS 3.4 (`ST_AsMVT` vector tiles)
-- **Frontend:** Next.js 15 (TypeScript, static export) + MapLibre GL JS + CARTO Dark Matter
+- **Frontend:** Next.js 15 (TypeScript, static export) + MapLibre GL JS + Esri World Dark Gray Canvas + custom PostGIS MVT vector layers
 - **Deployment:** Docker Compose + Caddy
 
 ## Quick Start (Local Development)
@@ -27,12 +27,18 @@ Raw VIIRS detections outnumber MODIS by roughly `4.76x` (Nominal+High confidence
 docker compose up -d db
 ```
 
-### 2. Run Ingestion & Server (Go)
+### 2. Run Migrations, Ingestion & API Server (Go)
 ```powershell
 copy .env.example .env
-go run ./cmd/pyrosync version
+go build -o bin/pyrosync.exe ./cmd/pyrosync
+.\bin\pyrosync.exe migrate
+.\bin\pyrosync.exe ingest-dir --area world data\input
+.\bin\pyrosync.exe ingest-dir --area pakistan-indus data\archive
+.\bin\pyrosync.exe recompute --all
+.\bin\pyrosync.exe calibrate
+.\bin\pyrosync.exe serve --addr 127.0.0.1:8080
 ```
-*(Full ingestion, recompute, and server commands activate as Phases 1-3 are built.)*
+If `FIRMS_MAP_KEY` is configured in `.env`, run live NASA FIRMS NRT ingestion on demand (`.\bin\pyrosync.exe ingest-api`) or let `serve` poll automatically on startup/interval (`INGEST_INTERVAL_MIN=60`).
 
 ### 3. Build & Run Frontend (Next.js)
 ```powershell
@@ -41,9 +47,22 @@ npm install
 npm run dev
 ```
 
-## Data Attribution
+## Golden Value Verification (`go test ./...`)
 
-Active fire data provided by NASA's Land, Atmosphere Near real-time Capability for EOS (LANCE) Fire Information for Resource Management System (FIRMS), MODIS Collection 6.1 and VIIRS 375 m Collection 2 products. Basemap tiles by OpenStreetMap contributors and CARTO.
+| Check | Expected Value |
+|---|---|
+| `raw_detections` count (seed corpus) | `971,896` (`+ NRT API rows` when live polling is enabled) |
+| Global 24h raw pixel ratio (`VIIRS / MODIS`, `conf >= 2`) | `4.76x` (`85,172 / 17,909`) |
+| Global 24h equal-area `A1` cell ratio (`conf >= 2`) | `2.65x` (`44,067 / 16,608`) |
+| Global 24h floor-aligned `A1` cell ratio (`>= 6.2 MW`, `conf >= 2`) | `1.12x` (`18,622 / 16,608`) |
+| Global 24h floor-aligned FRP ratio (`VIIRS_meq / MODIS`, `conf >= 2`) | `0.81x` (`428,626.80 MW / 530,451.80 MW`) |
+| Global `A10` full-day co-detection agreement (`2026-11-13`, `conf >= 2`) | `55.6%` (`1,778 / 3,200`) |
+| Pakistan / Indus `k_applied` (`conf >= 2`) | `0.66x` (`n = 2,600` overlap days) |
+
+## Space Agency & Data Attribution
+
+- **NASA FIRMS / LANCE:** Active fire data provided by NASA's Land, Atmosphere Near real-time Capability for EOS (LANCE) Fire Information for Resource Management System (FIRMS), operated by the NASA/GSFC Earth Science Data and Information System (ESDIS), MODIS Collection 6.1 (`MCD14DL` / `MCD14ML`) and VIIRS 375 m Collection 2 (`VNP14IMGTDL_NRT`, `VJ114IMGTDL_NRT`, `VJ214IMGTDL_NRT`).
+- **Basemap Tiles:** Esri, HERE, Garmin, OpenStreetMap contributors, and the GIS user community (World Dark Gray Canvas tiles).
 
 ## License
 

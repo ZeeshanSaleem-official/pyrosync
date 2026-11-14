@@ -235,10 +235,10 @@ export function CommandCenter() {
 
         <Inspector
           summary={summaryQuery.data}
-          summaryLoading={summaryQuery.isLoading}
+          summaryLoading={!hydrated || summaryQuery.isLoading}
           summaryError={summaryQuery.error instanceof Error ? summaryQuery.error.message : null}
           hourly={hourlyQuery.data}
-          hourlyLoading={hourlyQuery.isLoading}
+          hourlyLoading={!hydrated || hourlyQuery.isLoading}
           cellId={params.cellId}
           cellData={cellQuery.data}
           cellLoading={cellQuery.isLoading}
@@ -252,7 +252,7 @@ export function CommandCenter() {
         regions={regions}
         timelineDay={timelineDayQuery.data}
         timeline6h={timeline6hQuery.data}
-        liveLoading={timelineDayQuery.isLoading || timeline6hQuery.isLoading}
+        liveLoading={!hydrated || timelineDayQuery.isLoading || timeline6hQuery.isLoading}
         liveError={
           timelineDayQuery.error instanceof Error
             ? timelineDayQuery.error.message
@@ -261,7 +261,7 @@ export function CommandCenter() {
               : null
         }
         calendar={calendarQuery.data}
-        calendarLoading={calendarQuery.isLoading}
+        calendarLoading={!hydrated || calendarQuery.isLoading}
         calendarError={calendarQuery.error instanceof Error ? calendarQuery.error.message : null}
         onChangeTab={handleChangeTab}
         onChangeMetric={handleChangeMetric}

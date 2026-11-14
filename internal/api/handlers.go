@@ -186,12 +186,6 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var total int64
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM raw_detections`).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count raw detections")
-		return
-	}
-
 	satRows, err := s.pool.Query(ctx, `
 		SELECT sensor::text, satellite::text, status::text, COUNT(*)
 		FROM raw_detections
@@ -204,6 +198,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	defer satRows.Close()
 
+	var total int64
 	sats := make([]metaSatelliteCount, 0, 8)
 	for satRows.Next() {
 		var item metaSatelliteCount
@@ -211,6 +206,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to read satellite summary")
 			return
 		}
+		total += item.Count
 		sats = append(sats, item)
 	}
 	if err := satRows.Err(); err != nil {
@@ -321,6 +317,15 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	var sumMFRP, sumVAllFRP, sumVMeqFRP, sumHarmFRP float64
 
 	cellSQL := fmt.Sprintf(`
+		WITH slice AS MATERIALIZED (
+			SELECT
+				modis_px, viirs_px,
+				modis_frp, viirs_frp_all, viirs_frp_meq, harmonized_frp,
+				pt
+			FROM cell_day_a1
+			WHERE acq_date BETWEEN $1::date AND $2::date
+				AND conf_level = $3
+		)
 		SELECT
 			COALESCE(SUM(modis_px), 0),
 			COALESCE(SUM(viirs_px), 0),
@@ -332,10 +337,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 			COALESCE(SUM(viirs_frp_all), 0)::double precision,
 			COALESCE(SUM(viirs_frp_meq), 0)::double precision,
 			COALESCE(SUM(harmonized_frp), 0)::double precision
-		FROM cell_day_a1
-		WHERE acq_date BETWEEN $1::date AND $2::date
-			AND conf_level = $3
-			AND %s
+		FROM slice
+		WHERE %s
 	`, bboxExpr)
 
 	if err := s.pool.QueryRow(ctx, cellSQL, args...).Scan(
@@ -373,13 +376,17 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 			anyPartial = true
 		}
 		dKey := pt.Date.Format("2006-01-02")
+		unionVal := unionByDay[dKey]
+		if len(unionByDay) == 0 {
+			unionVal = pt.HarmonizedFRP
+		}
 		dailyOut = append(dailyOut, dailySummaryDTO{
 			Date:          dKey,
 			ModisFRP:      pt.ModisFRP,
 			ViirsAllFRP:   pt.ViirsAllFRP,
 			ViirsMeqFRP:   pt.ViirsMeqFRP,
 			HarmonizedFRP: round2(pt.HarmonizedFRP),
-			CellUnionFRP:  round2(unionByDay[dKey]),
+			CellUnionFRP:  round2(unionVal),
 			ModisPx:       pt.ModisPx,
 			ViirsPx:       pt.ViirsPx,
 			CellsModis:    pt.CellsModis,
@@ -495,7 +502,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 				ViirsAllFRP:   pt.ViirsAllFRP,
 				ViirsMeqFRP:   pt.ViirsMeqFRP,
 				HarmonizedFRP: round2(pt.HarmonizedFRP),
-				CellUnionFRP:  round2(unionByDay[dKey]),
+				CellUnionFRP:  round2(func() float64 { if len(unionByDay) == 0 { return pt.HarmonizedFRP }; return unionByDay[dKey] }()),
 				ModisPx:       pt.ModisPx,
 				ViirsPx:       pt.ViirsPx,
 				CellsModis:    pt.CellsModis,
@@ -772,13 +779,18 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request) {
 			zRounded = &zv
 		}
 
+		unionVal := unionByDay[dKey]
+		if len(unionByDay) == 0 {
+			unionVal = pt.HarmonizedFRP
+		}
+
 		daysOut = append(daysOut, dailySummaryDTO{
 			Date:          dKey,
 			ModisFRP:      pt.ModisFRP,
 			ViirsAllFRP:   pt.ViirsAllFRP,
 			ViirsMeqFRP:   pt.ViirsMeqFRP,
 			HarmonizedFRP: round2(pt.HarmonizedFRP),
-			CellUnionFRP:  round2(unionByDay[dKey]),
+			CellUnionFRP:  round2(unionVal),
 			RobustZ:       zRounded,
 			ModisPx:       pt.ModisPx,
 			ViirsPx:       pt.ViirsPx,
@@ -1092,17 +1104,21 @@ func (s *Server) queryA10Agreement(ctx context.Context, f queryFilter) (agreemen
 	}
 
 	sql := fmt.Sprintf(`
-		WITH base AS (
+		WITH slice AS MATERIALIZED (
+			SELECT acq_date, modis_px, viirs_px, pt
+			FROM cell_day_a10
+			WHERE acq_date BETWEEN $1::date AND $2::date
+				AND conf_level = $3
+		),
+		base AS (
 			SELECT
 				a.acq_date,
 				(a.modis_px > 0) AS has_m,
 				(a.viirs_px > 0) AS has_v,
 				%s AS is_partial
-			FROM cell_day_a10 a
+			FROM slice a
 			%s
-			WHERE a.acq_date BETWEEN $1::date AND $2::date
-				AND a.conf_level = $3
-				AND %s
+			WHERE %s
 		)
 		SELECT
 			COUNT(*) FILTER (WHERE has_m)::int,
@@ -1129,34 +1145,40 @@ func (s *Server) queryDailyBreakdown(
 	f queryFilter,
 ) ([]series.RegionDayInput, map[string]float64, error) {
 	unionByDay := make(map[string]float64)
-
 	bboxExpr, bboxArgs := f.bboxSQL("pt", 4)
 	unionArgs := append([]any{f.From, f.To, f.ConfLevel}, bboxArgs...)
-	unionSQL := fmt.Sprintf(`
-		SELECT acq_date, COALESCE(SUM(harmonized_frp), 0)::double precision
-		FROM cell_day_a1
-		WHERE acq_date BETWEEN $1::date AND $2::date
-			AND conf_level = $3
-			AND %s
-		GROUP BY acq_date
-	`, bboxExpr)
 
-	uRows, err := s.pool.Query(ctx, unionSQL, unionArgs...)
-	if err != nil {
-		return nil, nil, err
-	}
-	for uRows.Next() {
-		var d time.Time
-		var v float64
-		if err := uRows.Scan(&d, &v); err != nil {
-			uRows.Close()
+	if f.RegionID == "custom" || f.To.Sub(f.From) <= 31*24*time.Hour {
+		unionSQL := fmt.Sprintf(`
+			WITH slice AS MATERIALIZED (
+				SELECT acq_date, harmonized_frp, pt
+				FROM cell_day_a1
+				WHERE acq_date BETWEEN $1::date AND $2::date
+					AND conf_level = $3
+			)
+			SELECT acq_date, COALESCE(SUM(harmonized_frp), 0)::double precision
+			FROM slice
+			WHERE %s
+			GROUP BY acq_date
+		`, bboxExpr)
+
+		uRows, err := s.pool.Query(ctx, unionSQL, unionArgs...)
+		if err != nil {
 			return nil, nil, err
 		}
-		unionByDay[d.UTC().Format("2006-01-02")] = v
-	}
-	uRows.Close()
-	if err := uRows.Err(); err != nil {
-		return nil, nil, err
+		for uRows.Next() {
+			var d time.Time
+			var v float64
+			if err := uRows.Scan(&d, &v); err != nil {
+				uRows.Close()
+				return nil, nil, err
+			}
+			unionByDay[d.UTC().Format("2006-01-02")] = v
+		}
+		uRows.Close()
+		if err := uRows.Err(); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if f.RegionID != "custom" {
@@ -1206,6 +1228,12 @@ func (s *Server) queryDailyBreakdown(
 
 	// Custom bbox fallback aggregated dynamically from cell_day_a1.
 	customSQL := fmt.Sprintf(`
+		WITH slice AS MATERIALIZED (
+			SELECT acq_date, modis_frp, viirs_frp_all, viirs_frp_meq, harmonized_frp, modis_px, viirs_px, pt
+			FROM cell_day_a1
+			WHERE acq_date BETWEEN $1::date AND $2::date
+				AND conf_level = $3
+		)
 		SELECT
 			c.acq_date,
 			SUM(c.modis_frp)::double precision,
@@ -1217,16 +1245,14 @@ func (s *Server) queryDailyBreakdown(
 			COUNT(*) FILTER (WHERE c.viirs_frp_meq IS NOT NULL)::int,
 			COUNT(*) FILTER (WHERE c.harmonized_frp IS NOT NULL)::int,
 			COALESCE(cov.is_partial, FALSE)
-		FROM cell_day_a1 c
+		FROM slice c
 		LEFT JOIN (
 			SELECT acq_date, BOOL_OR(is_partial) AS is_partial
 			FROM coverage_days
 			WHERE area_id = 'world'
 			GROUP BY acq_date
 		) cov ON cov.acq_date = c.acq_date
-		WHERE c.acq_date BETWEEN $1::date AND $2::date
-			AND c.conf_level = $3
-			AND %s
+		WHERE %s
 		GROUP BY c.acq_date, cov.is_partial
 		ORDER BY c.acq_date
 	`, bboxExpr)
@@ -1265,13 +1291,14 @@ func (s *Server) loadOrFitCalibration(
 	if f.RegionID != "custom" {
 		var m series.CalibrationModel
 		err := s.pool.QueryRow(ctx, `
-			SELECT k, ci_low, ci_high, n_days, reliable, params_version
+			SELECT scope, k, ci_low, ci_high, n_days, reliable, params_version
 			FROM calibration_models
-			WHERE region_id = $1 AND scope = $2
-		`, f.RegionID, f.Scope).Scan(&m.K, &m.CILow, &m.CIHigh, &m.NDays, &m.Reliable, &m.ParamsVersion)
+			WHERE region_id = $1 AND (scope = $2 OR reliable = TRUE)
+			ORDER BY (scope = $2 AND reliable) DESC, reliable DESC, (scope = $2) DESC
+			LIMIT 1
+		`, f.RegionID, f.Scope).Scan(&m.Scope, &m.K, &m.CILow, &m.CIHigh, &m.NDays, &m.Reliable, &m.ParamsVersion)
 		if err == nil {
 			m.RegionID = f.RegionID
-			m.Scope = f.Scope
 			if m.Reliable && m.K > 0 {
 				m.KApplied = m.K
 			} else {
