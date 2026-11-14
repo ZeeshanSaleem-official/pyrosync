@@ -6,6 +6,8 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "../styles/tokens.css";
+import "../styles/dashboard.css";
+import { Providers } from "@/components/Providers";
 
 export const metadata: Metadata = {
   title: "PyroSync — Harmonized MODIS & VIIRS Active-Fire Explorer",
@@ -20,7 +22,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
