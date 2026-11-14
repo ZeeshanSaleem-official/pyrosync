@@ -446,13 +446,8 @@ func recordCoverageAndDirty(
 		dirtyList = append(dirtyList, d)
 	}
 	sort.Slice(dirtyList, func(i, j int) bool { return dirtyList[i].Before(dirtyList[j]) })
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO aggregate_dirty (acq_date)
-		SELECT UNNEST($1::date[])
-		ON CONFLICT (acq_date) DO UPDATE SET marked_at = now()
-	`, dirtyList); err != nil {
-		return fmt.Errorf("mark aggregate_dirty: %w", err)
+	if err := markAggregateDirty(ctx, tx, dirtyList); err != nil {
+		return err
 	}
 
 	// Complete yearly country SP archive CSVs cover every day of that year so zero-fire days stay distinct from missing years.
@@ -470,6 +465,9 @@ func recordCoverageAndDirty(
 			for d := startDay; !d.After(endDay); d = d.AddDate(0, 0, 1) {
 				covDates = append(covDates, d)
 				covPartial = append(covPartial, false)
+			}
+			if err := markAggregateDirty(ctx, tx, covDates); err != nil {
+				return err
 			}
 			return upsertCoverageBatch(ctx, tx, areaID, sensor, covDates, covPartial)
 		}
@@ -497,6 +495,21 @@ func recordCoverageAndDirty(
 		covPartial = append(covPartial, partial)
 	}
 	return upsertCoverageBatch(ctx, tx, areaID, sensor, covDates, covPartial)
+}
+
+func markAggregateDirty(ctx context.Context, tx pgx.Tx, dates []time.Time) error {
+	if len(dates) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO aggregate_dirty (acq_date)
+		SELECT UNNEST($1::date[])
+		ON CONFLICT (acq_date) DO UPDATE SET marked_at = now()
+	`, dates)
+	if err != nil {
+		return fmt.Errorf("mark aggregate_dirty: %w", err)
+	}
+	return nil
 }
 
 func upsertCoverageBatch(

@@ -7,13 +7,17 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"pyrosync/internal/aggregate"
 	"pyrosync/internal/config"
 	"pyrosync/internal/db"
 	"pyrosync/internal/ingest"
 )
 
-const version = "0.1.0-phase1"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -49,13 +53,31 @@ func main() {
 		if err := runIngestDir(ctx, cfg, logger, os.Args[2:]); err != nil {
 			fatal(cfg, logger, "ingest-dir failed", err)
 		}
-	case "serve", "ingest-api", "recompute", "calibrate":
-		fmt.Fprintf(os.Stderr, "subcommand %q will be implemented in Phase 2-3\n", cmd)
+	case "recompute":
+		if err := runRecompute(ctx, cfg, logger, os.Args[2:]); err != nil {
+			fatal(cfg, logger, "recompute failed", err)
+		}
+	case "calibrate":
+		if err := runCalibrate(ctx, cfg, logger, os.Args[2:]); err != nil {
+			fatal(cfg, logger, "calibrate failed", err)
+		}
+	case "serve", "ingest-api":
+		fmt.Fprintf(os.Stderr, "subcommand %q is not implemented yet\n", cmd)
 		os.Exit(1)
 	default:
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+func openMigratedPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+	if err := cfg.RequireDB(); err != nil {
+		return nil, err
+	}
+	if err := db.Migrate(ctx, cfg.DatabaseURL); err != nil {
+		return nil, err
+	}
+	return db.Open(ctx, cfg.DatabaseURL)
 }
 
 func runMigrate(ctx context.Context, cfg config.Config) error {
@@ -68,19 +90,14 @@ func runMigrate(ctx context.Context, cfg config.Config) error {
 func runIngestFile(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("ingest-file", flag.ContinueOnError)
 	area := fs.String("area", "auto", "coverage area ID (auto, world, or preset region ID)")
+	doRecompute := fs.Bool("recompute", false, "recompute dirty dates and recalibrate after ingest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: pyrosync ingest-file [--area auto] <path/to/file.csv>")
+		return fmt.Errorf("usage: pyrosync ingest-file [--area auto] [--recompute] <path/to/file.csv>")
 	}
-	if err := cfg.RequireDB(); err != nil {
-		return err
-	}
-	if err := db.Migrate(ctx, cfg.DatabaseURL); err != nil {
-		return err
-	}
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	pool, err := openMigratedPool(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -88,27 +105,28 @@ func runIngestFile(ctx context.Context, cfg config.Config, logger *slog.Logger, 
 
 	rep, err := ingest.IngestFile(ctx, pool, fs.Arg(0), ingest.FileOptions{AreaID: *area})
 	if rep != nil {
-		printReport(logger, rep)
+		printIngestReport(logger, rep)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if *doRecompute {
+		return recomputeAndCalibrate(ctx, pool, logger)
+	}
+	return nil
 }
 
 func runIngestDir(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("ingest-dir", flag.ContinueOnError)
 	area := fs.String("area", "auto", "coverage area ID (auto, world, or preset region ID)")
+	doRecompute := fs.Bool("recompute", false, "recompute dirty dates and recalibrate after ingest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: pyrosync ingest-dir [--area auto] <path/to/dir>")
+		return fmt.Errorf("usage: pyrosync ingest-dir [--area auto] [--recompute] <path/to/dir>")
 	}
-	if err := cfg.RequireDB(); err != nil {
-		return err
-	}
-	if err := db.Migrate(ctx, cfg.DatabaseURL); err != nil {
-		return err
-	}
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	pool, err := openMigratedPool(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -116,12 +134,146 @@ func runIngestDir(ctx context.Context, cfg config.Config, logger *slog.Logger, a
 
 	reports, err := ingest.IngestDir(ctx, pool, fs.Arg(0), ingest.FileOptions{AreaID: *area})
 	for _, rep := range reports {
-		printReport(logger, rep)
+		printIngestReport(logger, rep)
+	}
+	if err != nil {
+		return err
+	}
+	if *doRecompute {
+		return recomputeAndCalibrate(ctx, pool, logger)
+	}
+	return nil
+}
+
+func runRecompute(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("recompute", flag.ContinueOnError)
+	allFlag := fs.Bool("all", false, "recompute all covered and active dates")
+	dirtyFlag := fs.Bool("dirty", false, "recompute dates queued in aggregate_dirty")
+	dateStr := fs.String("date", "", "recompute a single UTC date (YYYY-MM-DD)")
+	sinceStr := fs.String("since", "", "recompute dates on or after YYYY-MM-DD (UTC)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	modeCount := 0
+	if *allFlag {
+		modeCount++
+	}
+	if *dirtyFlag {
+		modeCount++
+	}
+	if *dateStr != "" {
+		modeCount++
+	}
+	if *sinceStr != "" {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return fmt.Errorf("specify at most one of --all, --dirty, --date, or --since")
+	}
+
+	pool, err := openMigratedPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	var rep *aggregate.RecomputeReport
+	switch {
+	case *allFlag:
+		rep, err = aggregate.RecomputeAll(ctx, pool)
+	case *dateStr != "":
+		d, parseErr := time.Parse("2006-01-02", *dateStr)
+		if parseErr != nil {
+			return fmt.Errorf("invalid --date %q: use YYYY-MM-DD", *dateStr)
+		}
+		rep, err = aggregate.RecomputeDates(ctx, pool, []time.Time{d})
+	case *sinceStr != "":
+		d, parseErr := time.Parse("2006-01-02", *sinceStr)
+		if parseErr != nil {
+			return fmt.Errorf("invalid --since %q: use YYYY-MM-DD", *sinceStr)
+		}
+		rep, err = aggregate.RecomputeSince(ctx, pool, d)
+	default:
+		rep, err = aggregate.RecomputeDirty(ctx, pool)
+	}
+	if rep != nil {
+		logger.Info("recompute complete",
+			"dates_processed", rep.DatesProcessed,
+			"cell_a1_rows", rep.CellA1Rows,
+			"cell_a10_rows", rep.CellA10Rows,
+			"region_day_rows", rep.RegionDayRows,
+			"duration_ms", rep.Duration.Milliseconds(),
+		)
 	}
 	return err
 }
 
-func printReport(logger *slog.Logger, rep *ingest.FileReport) {
+func runCalibrate(ctx context.Context, cfg config.Config, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("calibrate", flag.ContinueOnError)
+	conf := fs.Int("conf", 2, "minimum confidence level (1=all, 2=nominal+high, 3=high)")
+	liveDays := fs.Int("live-days", 30, "trailing window in days for live calibration scope")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *conf < 1 || *conf > 3 {
+		return fmt.Errorf("invalid --conf %d: must be 1, 2, or 3", *conf)
+	}
+	if *liveDays <= 0 {
+		return fmt.Errorf("invalid --live-days %d: must be positive", *liveDays)
+	}
+
+	pool, err := openMigratedPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	models, err := aggregate.CalibrateAll(ctx, pool, aggregate.CalibrateOptions{
+		ConfLevel: *conf,
+		LiveDays:  *liveDays,
+	})
+	if err != nil {
+		return err
+	}
+	for _, m := range models {
+		logger.Info("calibrated region",
+			"region_id", m.RegionID,
+			"scope", m.Scope,
+			"n_days", m.NDays,
+			"k", fmt.Sprintf("%.4f", m.K),
+			"ci_low", fmt.Sprintf("%.4f", m.CILow),
+			"ci_high", fmt.Sprintf("%.4f", m.CIHigh),
+			"reliable", m.Reliable,
+			"k_applied", fmt.Sprintf("%.4f", m.KApplied),
+		)
+	}
+	return nil
+}
+
+func recomputeAndCalibrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	rep, err := aggregate.RecomputeDirty(ctx, pool)
+	if rep != nil {
+		logger.Info("recompute complete",
+			"dates_processed", rep.DatesProcessed,
+			"cell_a1_rows", rep.CellA1Rows,
+			"cell_a10_rows", rep.CellA10Rows,
+			"region_day_rows", rep.RegionDayRows,
+			"duration_ms", rep.Duration.Milliseconds(),
+		)
+	}
+	if err != nil {
+		return err
+	}
+	models, err := aggregate.CalibrateAll(ctx, pool, aggregate.CalibrateOptions{ConfLevel: 2, LiveDays: 30})
+	if err != nil {
+		return err
+	}
+	logger.Info("calibration refreshed", "models", len(models))
+	return nil
+}
+
+func printIngestReport(logger *slog.Logger, rep *ingest.FileReport) {
 	if rep.SkippedDuplicate {
 		logger.Info("skipped duplicate file", "file", rep.FileName, "sha256", rep.SHA256)
 		return
@@ -153,5 +305,5 @@ func fatal(cfg config.Config, logger *slog.Logger, msg string, err error) {
 
 func printUsage() {
 	fmt.Println("Usage: pyrosync <command> [flags]")
-	fmt.Println("Commands: migrate, ingest-file, ingest-dir, serve, ingest-api, recompute, calibrate, version")
+	fmt.Println("Commands: migrate, ingest-file, ingest-dir, recompute, calibrate, serve, ingest-api, version")
 }
