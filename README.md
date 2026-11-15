@@ -2,6 +2,8 @@
 
 **Harmonized MODIS & VIIRS Active-Fire Explorer and Burning Activity Calendar**
 
+- **Live Explorer:** https://pyrosync.earth
+
 PyroSync reconciles multi-sensor satellite thermal anomaly records across legacy **MODIS** (`1.0 km` nadir pixels; Terra & Aqua) and higher-resolution **VIIRS** (`375 m` pixels; Suomi-NPP, NOAA-20, NOAA-21) so fire activity and seasonal anomalies remain comparable as MODIS approaches end of mission.
 
 ## Method Summary
@@ -47,6 +49,14 @@ npm install
 npm run dev
 ```
 
+### 4. Production Deployment (Docker Compose + Caddy)
+Build the static frontend export into `web/out`, configure `deploy/.env` from `deploy/.env.example`, and start PostGIS, the Go API, and Caddy:
+```bash
+cd web && npm ci && NEXT_PUBLIC_API_BASE=/api/v1 npm run build && cd ..
+cp deploy/.env.example deploy/.env
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
+```
+
 ## Golden Value Verification (`go test ./...`)
 
 | Check | Expected Value |
@@ -63,6 +73,7 @@ npm run dev
 
 - **NASA FIRMS / LANCE:** Active fire data provided by NASA's Land, Atmosphere Near real-time Capability for EOS (LANCE) Fire Information for Resource Management System (FIRMS), operated by the NASA/GSFC Earth Science Data and Information System (ESDIS), MODIS Collection 6.1 (`MCD14DL` / `MCD14ML`) and VIIRS 375 m Collection 2 (`VNP14IMGTDL_NRT`, `VJ114IMGTDL_NRT`, `VJ214IMGTDL_NRT`).
 - **Basemap Tiles:** Esri, HERE, Garmin, OpenStreetMap contributors, and the GIS user community (World Dark Gray Canvas tiles).
+- **AI Tool Transparency:** Architecture planning, code scaffolding, and documentation refinement were assisted by AI coding assistants. All scientific harmonization formulas, equal-area spatial aggregations, bootstrap confidence intervals, and validation metrics are deterministic and computed directly from official NASA FIRMS datasets in Go and PostgreSQL/PostGIS.
 
 ## License
 
